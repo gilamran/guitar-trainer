@@ -858,7 +858,8 @@ select {
 }
 
 .slider-field output {
-  width: 4.2em;
+  width: 5.2em;
+  white-space: nowrap;
   text-align: right;
   font-variant-numeric: tabular-nums;
 }

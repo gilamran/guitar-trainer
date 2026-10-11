@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dev-dist/
+coverage/
+*.log
+.DS_Store
+# copied in by the alphaTab Vite plugin at build/dev time
+public/font/
+public/soundfont/

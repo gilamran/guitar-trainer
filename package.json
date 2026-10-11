@@ -4,7 +4,6 @@
   "version": "0.1.0",
   "description": "Browser-based guitar practice app: load Guitar Pro / MusicXML, loop sections, get real-time mic feedback.",
   "type": "module",
-  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/gilamran/guitar-trainer.git"

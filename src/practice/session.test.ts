@@ -32,6 +32,10 @@ interface SimOptions {
   stopAfterMs?: number;
   /** Seek to this tick after this many ms into the last pass. */
   seek?: { afterMs: number; tick: number };
+  /** Tick alphaTab reports for the loop-wrap seek (it rounds, e.g. 1 instead of 0). */
+  wrapTick?: number;
+  /** Playback stalls for `durationMs` at `atMs` into pass `pass`; everything after shifts. */
+  stall?: { pass: number; atMs: number; durationMs: number };
 }
 
 function simulate(o: SimOptions) {
@@ -61,22 +65,25 @@ function simulate(o: SimOptions) {
   at(t0 - 1500, () => session.onPosition({ tick: 0, perfMs: t0 - 1500, isSeek: true })); // setLoop before play
 
   let end = t0;
+  const stall = o.stall;
   for (let p = 0; p < o.passes; p++) {
-    const start = t0 + p * passMs;
+    const start = t0 + p * passMs + (stall && p > stall.pass ? stall.durationMs : 0);
+    // Real time of song position `ms` within this pass, including a stall.
+    const real = (ms: number) => start + ms + (stall && stall.pass === p && ms >= stall.atMs ? stall.durationMs : 0);
     const last = p === o.passes - 1;
     const stopAt = last && o.stopAfterMs !== undefined ? start + o.stopAfterMs : null;
     const seekAt = last && o.seek ? start + o.seek.afterMs : null;
-    const limit = stopAt ?? seekAt ?? start + passMs;
+    const limit = stopAt ?? seekAt ?? real(passMs);
 
-    for (let ms = 0; start + ms < limit; ms += 10) {
+    for (let ms = 0; real(ms) < limit; ms += 10) {
       const tick = tempo.msToTick(ms * speed);
-      const arrive = start + ms + rand() * 12; // positions arrive 0–12 ms late
+      const arrive = real(ms) + rand() * 12; // positions arrive 0–12 ms late
       at(arrive, () => session.onPosition({ tick, perfMs: arrive, isSeek: false }));
     }
     timeline.forEach((e, i) => {
       const act = player(i, p);
       if (!act) return;
-      const audible = start + tempo.tickToMs(e.tick) / speed + act.errorMs;
+      const audible = real(tempo.tickToMs(e.tick) / speed) + act.errorMs;
       if (audible > limit) return;
       const reported = audible + actual;
       at(reported + 120, () =>
@@ -91,8 +98,8 @@ function simulate(o: SimOptions) {
       at(seekAt, () => session.onPosition({ tick: o.seek!.tick, perfMs: seekAt, isSeek: true }));
       end = seekAt;
     } else {
-      const wrap = start + passMs;
-      at(wrap, () => session.onPosition({ tick: 0, perfMs: wrap, isSeek: true }));
+      const wrap = real(passMs);
+      at(wrap, () => session.onPosition({ tick: o.wrapTick ?? 0, perfMs: wrap, isSeek: true }));
       end = wrap;
     }
   }
@@ -117,6 +124,31 @@ describe('PracticeSession', () => {
       expect(r.score.percentHit).toBe(100);
       expect(Math.abs(r.score.medianTimingErrorMs!)).toBeLessThan(15);
     }
+  });
+
+  it('marks a pass that started mid-range (e.g. after resuming) as partial', () => {
+    const session = new PracticeSession({ range, timeline, tempo, speed: 1, latencyMs: 0, match: DEFAULT_MATCH_OPTIONS });
+    const reports: PassReport[] = [];
+    session.passFinished.on((r) => reports.push(r));
+    // playback resumes at beat 5 and runs to the loop wrap
+    for (let ms = 2500; ms < 4000; ms += 10) session.onPosition({ tick: tempo.msToTick(ms), perfMs: ms, isSeek: false });
+    session.onPosition({ tick: 0, perfMs: 4000, isSeek: true });
+    session.update(6000);
+    expect(reports).toHaveLength(1);
+    expect(reports[0].partial).toBe(true);
+    expect(reports[0].events.map((e) => e.tick)).toEqual([5, 6, 7].map((b) => b * PPQ));
+  });
+
+  it('tolerates rounded seek ticks at the loop wrap', () => {
+    const { reports } = simulate({ passes: 3, wrapTick: 1 });
+    expect(reports.map((r) => r.score.total)).toEqual([8, 8, 8]);
+    expect(reports.every((r) => !r.partial && r.score.percentHit === 100)).toBe(true);
+  });
+
+  it('follows a playback stall in the middle of a pass', () => {
+    // Audio (and therefore the player) is 250 ms behind after the stall.
+    const { reports } = simulate({ passes: 2, stall: { pass: 0, atMs: 1200, durationMs: 250 } });
+    expect(reports.map((r) => r.score.percentHit)).toEqual([100, 100]);
   });
 
   it('accounts for playback speed', () => {
@@ -163,6 +195,7 @@ describe('PracticeSession', () => {
     const { reports, lives } = simulate({ passes: 1, seek: { afterMs: 1200, tick: 5 * PPQ } });
     expect(reports[0].partial).toBe(true);
     expect(reports[0].score.total).toBe(3);
+    expect(reports).toHaveLength(1);
     // the new pass was opened from tick 5·PPQ, but no positions arrived yet → no live state for it
     expect(lives.every((l) => l.passIndex === 1)).toBe(true);
   });

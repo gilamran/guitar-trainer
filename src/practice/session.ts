@@ -54,13 +54,26 @@ export interface PassReport {
  */
 export const DETECTION_DELAY_MS = 160;
 
+/** Stopping within this many ticks of the range end still counts as a full pass. */
+const END_TOLERANCE_TICKS = PPQ / 2;
+/** alphaTab reports seek targets with rounding (a loop wrap to tick 0 may say 1). */
+const SEEK_TOLERANCE_TICKS = PPQ / 8;
+/** Position samples within this many ticks of a note place that note in time. */
+const LOCAL_ANCHOR_TICKS = PPQ / 2;
+const MIN_LOCAL_SAMPLES = 3;
+
+interface AnchorSample {
+  readonly tick: number;
+  /** performance.now() at which `fromTick` would have played, implied by this sample. */
+  readonly anchor: number;
+}
+
 interface Pass {
   readonly index: number;
   readonly fromTick: number;
   events: TimelineEvent[];
-  expected: ExpectedEvent[];
-  /** Estimates of performance.now() at `fromTick`, one per position sample. */
-  readonly anchorEstimates: number[];
+  /** Non-seek position samples, in arrival (= tick) order. */
+  readonly samples: AnchorSample[];
   lastTick: number;
   closedAtPerf: number | null;
   partial: boolean;
@@ -74,28 +87,57 @@ interface StoredDetection {
   readonly confidence: number;
 }
 
-/** Stopping within this many ticks of the range end still counts as a full pass. */
-const END_TOLERANCE_TICKS = PPQ / 2;
-
-/** Low percentile: positions arrive late but never early, so the earliest estimates are best. */
-function anchorOf(pass: Pass): number | null {
-  const a = pass.anchorEstimates;
-  if (a.length === 0) return null;
-  const sorted = [...a].sort((x, y) => x - y);
+/** Positions arrive late but never early, so the earliest estimates are best; p10 resists outliers. */
+function lowPercentile(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor((sorted.length - 1) * 0.1)];
+}
+
+function lowerBound(samples: readonly AnchorSample[], tick: number): number {
+  let lo = 0;
+  let hi = samples.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (samples[mid].tick < tick) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** One reference anchor for the whole pass (only used as the axis origin). */
+function passAnchor(pass: Pass): number | null {
+  return pass.samples.length ? lowPercentile(pass.samples.map((s) => s.anchor)) : null;
+}
+
+/**
+ * Anchor for a note at `tick`, from the position samples around it. Playback
+ * glitches (a buffer underrun, a stalled audio thread) shift everything after
+ * them; a local anchor follows that shift instead of misjudging the rest of
+ * the pass. Notes not reached yet use the most recent samples.
+ */
+function localAnchor(pass: Pass, tick: number): number | null {
+  const s = pass.samples;
+  if (s.length === 0) return null;
+  const t = Math.min(Math.max(tick, s[0].tick), s[s.length - 1].tick);
+  const lo = lowerBound(s, t - LOCAL_ANCHOR_TICKS);
+  const hi = lowerBound(s, t + LOCAL_ANCHOR_TICKS + 1);
+  if (hi - lo >= MIN_LOCAL_SAMPLES) return lowPercentile(s.slice(lo, hi).map((x) => x.anchor));
+  const mid = lowerBound(s, t);
+  const from = Math.max(0, Math.min(mid - MIN_LOCAL_SAMPLES, s.length - 2 * MIN_LOCAL_SAMPLES));
+  return lowPercentile(s.slice(from, from + 2 * MIN_LOCAL_SAMPLES).map((x) => x.anchor));
 }
 
 /**
  * Follows playback and the microphone, splits playback into loop passes and
  * judges each pass.
  *
- * Time base: every pass is anchored to the performance.now() time at which
- * its first tick played, estimated from alphaTab's position events. Expected
- * onsets are placed relative to that anchor with the tempo map and playback
- * speed; detections are shifted by the calibrated latency and placed on the
- * same axis. A loop wrap (a seek back to the range start after reaching its
- * end) closes the pass; it is scored once late detections can no longer
- * arrive. Any other seek, or stopping, closes the pass as partial.
+ * Time base: alphaTab's position events tell when each tick played on the
+ * performance.now() clock. Every expected onset is placed at the time implied
+ * by the positions around its tick (plus the tempo map and playback speed);
+ * detections are shifted by the calibrated latency onto the same clock. A
+ * loop wrap (a seek back to the range start after reaching its end) closes
+ * the pass; it is scored once late detections can no longer arrive. Any other
+ * seek, or stopping, closes the pass as partial.
  *
  * No DOM, no audio: driven entirely by the inputs below, so it can be tested
  * with synthetic clocks.
@@ -122,11 +164,11 @@ export class PracticeSession {
       const span = range.endTick - range.startTick;
       const isWrap =
         cur !== null &&
-        Math.abs(p.tick - range.startTick) <= 1 &&
+        Math.abs(p.tick - range.startTick) <= SEEK_TOLERANCE_TICKS &&
         cur.lastTick >= range.startTick + span / 2;
       this.closeCurrent(p.perfMs, !isWrap);
       // The pass starts now, but seek events don't reflect audible audio yet:
-      // they are not used for the anchor.
+      // they are not used as samples.
       this.current = this.openPass(p.tick);
       return;
     }
@@ -140,11 +182,11 @@ export class PracticeSession {
     }
 
     const pass = this.current!;
-    if (p.tick < pass.fromTick || p.tick > range.endTick) return;
+    if (p.tick < pass.fromTick || p.tick > range.endTick || p.tick < pass.lastTick) return;
     const { tempo, speed } = this.config;
     const elapsed = (tempo.tickToMs(p.tick) - tempo.tickToMs(pass.fromTick)) / speed;
-    pass.anchorEstimates.push(p.perfMs - elapsed);
-    pass.lastTick = Math.max(pass.lastTick, p.tick);
+    pass.samples.push({ tick: p.tick, anchor: p.perfMs - elapsed });
+    pass.lastTick = p.tick;
   }
 
   /** Feed every detected note. */
@@ -173,25 +215,24 @@ export class PracticeSession {
     }
 
     const cur = this.current;
-    const anchor = cur ? anchorOf(cur) : null;
-    if (cur && anchor !== null) {
-      const nowMs = nowPerf - anchor - DETECTION_DELAY_MS;
-      const result = matchEvents(cur.expected, this.detectionsFor(cur, anchor), this.config.match, nowMs);
+    const origin = cur ? passAnchor(cur) : null;
+    if (cur && origin !== null) {
+      const expected = this.expectedFor(cur, origin);
+      const nowMs = nowPerf - origin - DETECTION_DELAY_MS;
+      const result = matchEvents(expected, this.detectionsFor(expected, origin), this.config.match, nowMs);
       this.live.emit({ passIndex: cur.index, events: cur.events, results: result.results });
     }
   }
 
   private openPass(fromTick: number): Pass {
-    const { range, timeline, tempo, speed } = this.config;
+    const { range, timeline } = this.config;
     const start = Math.max(range.startTick, Math.min(fromTick, range.endTick));
-    const events = timeline.filter((e) => e.tick >= start && e.tick < range.endTick);
-    const t0 = tempo.tickToMs(start);
+    const first = Math.max(range.startTick, start - SEEK_TOLERANCE_TICKS);
     const pass: Pass = {
       index: ++this.passCount,
       fromTick: start,
-      events,
-      expected: events.map((e) => ({ id: e.id, timeMs: (tempo.tickToMs(e.tick) - t0) / speed, pitches: e.pitches })),
-      anchorEstimates: [],
+      events: timeline.filter((e) => e.tick >= first && e.tick < range.endTick),
+      samples: [],
       lastTick: start,
       closedAtPerf: null,
       partial: false,
@@ -204,29 +245,39 @@ export class PracticeSession {
     const pass = this.current;
     this.current = null;
     if (!pass) return;
-    if (pass.anchorEstimates.length === 0) {
+    if (pass.samples.length === 0) {
       this.passes = this.passes.filter((p) => p !== pass);
       return;
     }
     pass.closedAtPerf = perfMs;
-    if (partial) {
-      // Only judge what was actually reached.
-      const keep = pass.events.map((e) => e.tick <= pass.lastTick);
-      pass.events = pass.events.filter((_, i) => keep[i]);
-      pass.expected = pass.expected.filter((_, i) => keep[i]);
-      pass.partial = pass.lastTick < this.config.range.endTick - END_TOLERANCE_TICKS;
-    }
+    const { startTick, endTick } = this.config.range;
+    const startedLate = pass.fromTick > startTick + SEEK_TOLERANCE_TICKS;
+    // Only judge what was actually reached.
+    if (partial) pass.events = pass.events.filter((e) => e.tick <= pass.lastTick);
+    pass.partial = startedLate || (partial && pass.lastTick < endTick - END_TOLERANCE_TICKS);
   }
 
-  private detectionsFor(pass: Pass, anchor: number): DetectedEvent[] {
-    if (pass.expected.length === 0) return [];
+  /** Expected onsets, in ms relative to `origin` (a performance.now() time). */
+  private expectedFor(pass: Pass, origin: number): ExpectedEvent[] {
+    const { tempo, speed } = this.config;
+    const t0 = tempo.tickToMs(pass.fromTick);
+    return pass.events.map((e) => ({
+      id: e.id,
+      pitches: e.pitches,
+      timeMs: (localAnchor(pass, e.tick) ?? origin) + (tempo.tickToMs(e.tick) - t0) / speed - origin,
+    }));
+  }
+
+  /** Unconsumed detections near the expected onsets, in ms relative to `origin`. */
+  private detectionsFor(expected: readonly ExpectedEvent[], origin: number): DetectedEvent[] {
+    if (expected.length === 0) return [];
     const margin = this.config.match.outerWindowMs + 50;
-    const first = pass.expected[0].timeMs - margin;
-    const last = pass.expected[pass.expected.length - 1].timeMs + margin;
+    const first = expected[0].timeMs - margin;
+    const last = expected[expected.length - 1].timeMs + margin;
     const out: DetectedEvent[] = [];
     for (const d of this.detections) {
       if (this.consumed.has(d.id)) continue;
-      const t = d.perfMs - anchor;
+      const t = d.perfMs - origin;
       if (t >= first && t <= last) out.push({ id: d.id, timeMs: t, pitches: d.pitches, confidence: d.confidence });
     }
     return out;
@@ -234,15 +285,16 @@ export class PracticeSession {
 
   private finalize(pass: Pass): void {
     this.passes = this.passes.filter((p) => p !== pass);
-    const anchor = anchorOf(pass);
-    if (anchor === null || pass.expected.length === 0) return;
+    const origin = passAnchor(pass);
+    if (origin === null || pass.events.length === 0) return;
 
-    const result = matchEvents(pass.expected, this.detectionsFor(pass, anchor), this.config.match);
+    const expected = this.expectedFor(pass, origin);
+    const result = matchEvents(expected, this.detectionsFor(expected, origin), this.config.match);
     // A detection judged here can't also count for the next pass.
     for (const r of result.results) if (r.detectedId !== undefined) this.consumed.add(r.detectedId);
 
     // Forget detections that no later pass can use.
-    const horizon = anchor + pass.expected[pass.expected.length - 1].timeMs - 5000;
+    const horizon = origin + expected[expected.length - 1].timeMs - 5000;
     this.detections = this.detections.filter((d) => d.perfMs >= horizon);
     const alive = new Set(this.detections.map((d) => d.id));
     for (const id of this.consumed) if (!alive.has(id)) this.consumed.delete(id);

@@ -29,6 +29,16 @@ import { SettingsDialog } from './settings-dialog';
 import { toast } from './toast';
 import { VerdictOverlay } from './verdict-overlay';
 
+/** File Handling API (installed PWA opened with a score file); not yet in lib.dom. */
+interface LaunchParams {
+  readonly files: readonly FileSystemFileHandle[];
+}
+declare global {
+  interface Window {
+    launchQueue?: { setConsumer(consumer: (params: LaunchParams) => void): void };
+  }
+}
+
 const DEFAULT_LOOP_BARS = 4;
 const SESSION_TICK_MS = 100;
 
@@ -124,6 +134,10 @@ export class App {
     this.ui.fileInput.accept = SCORE_ACCEPT;
     this.bindControls();
     this.bindDragAndDrop();
+    window.launchQueue?.setConsumer(async ({ files }) => {
+      const handle = files[0];
+      if (handle) void this.openFile(await handle.getFile());
+    });
     this.syncControlsFromSettings();
 
     this.detector.notes.on((n) => this.session?.onNote(n));

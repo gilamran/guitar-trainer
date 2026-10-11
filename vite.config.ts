@@ -13,7 +13,14 @@ export default defineConfig({
   ],
   build: {
     target: 'es2022',
-    chunkSizeWarningLimit: 2000,
+    chunkSizeWarningLimit: 2500,
+  },
+  // alphaTab's worker/worklet and our detector worker are ES modules. The
+  // alphaTab plugin bundles its worker and worklet itself and only minifies
+  // them when asked to here.
+  worker: {
+    format: 'es',
+    rolldownOptions: { output: { minify: true } },
   },
   test: {
     include: ['src/**/*.test.ts'],

@@ -4,11 +4,205 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="description" content="Practice guitar parts from Guitar Pro / MusicXML files with real-time microphone feedback." />
-    <meta name="theme-color" content="#14161a" />
+    <meta name="theme-color" content="#16181c" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>Guitar Trainer</title>
   </head>
   <body>
-    <div id="app"></div>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true" data-icon="logo"></span>
+          <span class="brand-name">Guitar Trainer</span>
+        </div>
+        <div class="song" id="song-title" hidden></div>
+        <div class="topbar-actions">
+          <label class="select-wrap" id="track-field" hidden>
+            <span class="sr-only">Track</span>
+            <select id="track-select"></select>
+          </label>
+          <button type="button" class="btn" id="open-btn"><span data-icon="folder"></span><span class="label">Open</span></button>
+          <button type="button" class="btn icon-only" id="settings-btn" aria-label="Settings" title="Settings">
+            <span data-icon="settings"></span>
+          </button>
+          <input type="file" id="file-input" hidden />
+        </div>
+      </header>
+
+      <div class="banner" id="calibrate-banner" hidden>
+        <span class="banner-text">Timing isn’t calibrated for this device yet, so “early/late” may be off.</span>
+        <span class="banner-actions">
+          <button type="button" class="btn small" data-action="calibrate">Calibrate</button>
+          <button type="button" class="btn small ghost" data-action="dismiss">Later</button>
+        </span>
+      </div>
+
+      <main class="stage" id="stage">
+        <section class="empty" id="empty-state">
+          <div class="drop-card">
+            <span class="drop-icon" aria-hidden="true" data-icon="upload"></span>
+            <h1>Practice any guitar part</h1>
+            <p>Drop a Guitar Pro or MusicXML file here, or</p>
+            <button type="button" class="btn primary" data-action="open">Choose a file</button>
+            <p class="hint">.gp · .gp5 · .gpx · .musicxml · .mxl — files never leave this device.</p>
+            <ol class="steps">
+              <li><strong>Pick</strong> your track and the bars to loop.</li>
+              <li><strong>Listen</strong> — allow the microphone.</li>
+              <li><strong>Play along</strong> — notes turn <em class="c-hit">green</em>, <em class="c-off">yellow</em> or <em class="c-miss">red</em>.</li>
+            </ol>
+          </div>
+        </section>
+
+        <div class="score-scroll" id="score-scroll" hidden>
+          <div class="score-paper">
+            <div class="score-wrap">
+              <div id="alphatab"></div>
+              <div class="verdict-layer" id="verdict-layer" aria-hidden="true"></div>
+            </div>
+          </div>
+        </div>
+        <div class="zoom" id="zoom" hidden>
+          <button type="button" class="btn icon-only small" data-zoom="-1" aria-label="Zoom out"><span data-icon="minus"></span></button>
+          <button type="button" class="btn icon-only small" data-zoom="1" aria-label="Zoom in"><span data-icon="plus"></span></button>
+        </div>
+        <div class="loading" id="loading" hidden><span class="spinner" aria-hidden="true"></span><span id="loading-text">Loading…</span></div>
+      </main>
+
+      <section class="results" id="results" hidden aria-live="polite">
+        <div class="pass-latest" id="pass-latest">
+          <div class="pass-empty">Turn on <strong>Listen</strong> and play a loop — your score appears here after each pass.</div>
+        </div>
+        <div class="pass-history" id="pass-history" aria-label="Score per pass"></div>
+      </section>
+
+      <footer class="transport" id="transport" hidden>
+        <div class="group play-group">
+          <button type="button" class="btn round primary" id="play-btn" aria-label="Play" title="Play / pause (Space)" disabled>
+            <span data-icon="play"></span>
+          </button>
+          <button type="button" class="btn round" id="stop-btn" aria-label="Stop" title="Stop"><span data-icon="stop"></span></button>
+        </div>
+
+        <div class="group range-group">
+          <span class="group-label">Bars</span>
+          <input type="number" id="bar-from" min="1" value="1" inputmode="numeric" aria-label="First bar" />
+          <span class="dash">–</span>
+          <input type="number" id="bar-to" min="1" value="4" inputmode="numeric" aria-label="Last bar" />
+          <button type="button" class="btn toggle" id="loop-btn" aria-pressed="true" title="Loop the selected bars (L)">
+            <span data-icon="loop"></span><span class="label">Loop</span>
+          </button>
+        </div>
+
+        <div class="group speed-group">
+          <span class="group-label">Speed</span>
+          <input type="range" id="speed" min="40" max="100" step="5" value="100" aria-label="Playback speed" />
+          <output id="speed-value" for="speed">100%</output>
+        </div>
+
+        <div class="group toggles-group">
+          <button type="button" class="btn toggle" id="countin-btn" aria-pressed="true" title="Count-in before playback">
+            <span data-icon="countin"></span><span class="label">Count-in</span>
+          </button>
+          <button type="button" class="btn toggle" id="metronome-btn" aria-pressed="false" title="Metronome">
+            <span data-icon="metronome"></span><span class="label">Click</span>
+          </button>
+          <button type="button" class="btn toggle" id="mypart-btn" aria-pressed="true" title="Hear the synth play your part">
+            <span data-icon="speaker"></span><span class="label">My part</span>
+          </button>
+        </div>
+
+        <div class="group listen-group">
+          <button type="button" class="btn toggle listen" id="listen-btn" aria-pressed="false" title="Listen to the microphone and judge your playing">
+            <span data-icon="mic"></span><span class="label">Listen</span>
+          </button>
+          <div class="meter" id="meter" title="Input level (the mark is the noise gate)">
+            <div class="meter-fill" id="meter-fill"></div>
+            <div class="meter-gate" id="meter-gate"></div>
+          </div>
+        </div>
+      </footer>
+
+      <div class="drop-overlay" id="drop-overlay" hidden><div>Drop to open</div></div>
+
+      <dialog id="settings-dialog" class="dialog">
+        <form method="dialog" class="dialog-body">
+          <header class="dialog-head">
+            <h2>Settings</h2>
+            <button type="submit" class="btn icon-only ghost" aria-label="Close"><span data-icon="close"></span></button>
+          </header>
+
+          <fieldset>
+            <legend>Judging</legend>
+            <label class="row">
+              <span>Timing window <small>± ms counted as on time</small></span>
+              <span class="slider-field"><input type="range" name="timingWindowMs" min="40" max="250" step="10" /><output></output></span>
+            </label>
+            <label class="row">
+              <span>Pitch tolerance <small>± cents</small></span>
+              <span class="slider-field"><input type="range" name="pitchToleranceCents" min="10" max="100" step="5" /><output></output></span>
+            </label>
+            <label class="row">
+              <span>Chords <small>how multi-note beats are judged</small></span>
+              <select name="chordPolicy">
+                <option value="any-tone">Timing + any chord tone</option>
+                <option value="root">Timing + root note</option>
+                <option value="timing-only">Timing only</option>
+              </select>
+            </label>
+            <label class="row">
+              <span>Onset sensitivity <small>raise if quiet notes are missed</small></span>
+              <select name="onsetSensitivity">
+                <option value="low">Low (noisy room)</option>
+                <option value="normal">Normal</option>
+                <option value="high">High (soft playing)</option>
+              </select>
+            </label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Latency</legend>
+            <label class="row">
+              <span>Input latency <small id="latency-note">not calibrated</small></span>
+              <span class="number-field"><input type="number" name="latencyMs" min="-200" max="1000" step="1" placeholder="—" /> ms</span>
+            </label>
+            <div class="row end">
+              <button type="button" class="btn" data-action="calibrate"><span data-icon="target"></span>Calibrate…</button>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Mix</legend>
+            <label class="row">
+              <span>Backing tracks volume</span>
+              <span class="slider-field"><input type="range" name="backingVolume" min="0" max="1" step="0.05" /><output></output></span>
+            </label>
+          </fieldset>
+        </form>
+      </dialog>
+
+      <dialog id="calibration-dialog" class="dialog">
+        <div class="dialog-body">
+          <header class="dialog-head">
+            <h2>Latency calibration</h2>
+            <button type="button" class="btn icon-only ghost" data-action="close" aria-label="Close"><span data-icon="close"></span></button>
+          </header>
+          <p>
+            You’ll hear <strong>4 count-in clicks</strong> followed by <strong>8 clicks</strong>. On each of the 8, clap or
+            pick a muted string — exactly on the click. Use the same speakers or headphones you practice with.
+          </p>
+          <div class="beats" id="calib-beats" aria-hidden="true"></div>
+          <p class="calib-status" id="calib-status" role="status"></p>
+          <footer class="dialog-foot">
+            <button type="button" class="btn ghost" data-action="close">Cancel</button>
+            <button type="button" class="btn" data-action="start" id="calib-start">Start</button>
+            <button type="button" class="btn primary" data-action="save" id="calib-save" hidden>Save</button>
+          </footer>
+        </div>
+      </dialog>
+
+      <div class="toasts" id="toasts" aria-live="assertive"></div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

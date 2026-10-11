@@ -64,6 +64,10 @@ export class ScoreView {
 
   private trackIndex = 0;
   private noteBoxes = new Map<number, NoteBox[]>();
+  /** Bars to highlight; (re)applied after every render because bounds change. */
+  private highlight: { fromBar: number; toBar: number } | null = null;
+  /** False between starting a render and its completion: bounds belong to the old layout. */
+  private layoutCurrent = false;
 
   constructor(element: HTMLElement, scrollElement: HTMLElement) {
     const base = import.meta.env.BASE_URL;
@@ -88,11 +92,14 @@ export class ScoreView {
 
     this.api.scoreLoaded.on((s) => this.scoreLoaded.emit(s));
     this.api.postRenderFinished.on(() => {
+      this.layoutCurrent = true;
       this.rebuildNoteBoxes();
+      this.applyHighlight();
       this.rendered.emit();
     });
     this.api.playerReady.on(() => this.playerReady.emit());
-    this.api.midiLoaded.on(() => {
+    // midiLoad fires synchronously right after the tick cache is (re)built.
+    this.api.midiLoad.on(() => {
       const lookup = this.api.tickCache;
       if (lookup) this.midiLoaded.emit(lookup);
     });
@@ -135,6 +142,8 @@ export class ScoreView {
   showScore(score: Score, trackIndex = defaultTrackIndex(score)): void {
     this.trackIndex = trackIndex;
     this.noteBoxes.clear();
+    this.highlight = null;
+    this.beforeLayoutChange();
     this.api.renderScore(score, [trackIndex]);
   }
 
@@ -142,6 +151,7 @@ export class ScoreView {
     const track = this.score?.tracks[trackIndex];
     if (!track) return;
     this.trackIndex = trackIndex;
+    this.beforeLayoutChange();
     this.api.renderTracks([track]);
   }
 
@@ -181,7 +191,6 @@ export class ScoreView {
     } else {
       this.api.playbackRange = null;
       this.api.isLooping = false;
-      this.api.clearPlaybackRangeHighlight();
     }
   }
 
@@ -191,8 +200,55 @@ export class ScoreView {
     if (!score) return;
     const own = score.tracks[this.trackIndex];
     const others = score.tracks.filter((t) => t !== own);
-    if (own) this.api.changeTrackMute([own], muteOwnTrack);
+    // Reset first: the practiced track may have changed since the last call.
+    this.api.changeTrackMute(score.tracks, false);
+    if (own) {
+      this.api.changeTrackVolume([own], 1);
+      if (muteOwnTrack) this.api.changeTrackMute([own], true);
+    }
     if (others.length) this.api.changeTrackVolume(others, backingVolume);
+  }
+
+  /** Shows alphaTab's selection highlight over bars `fromBar`…`toBar` (0-based) of the practiced track. */
+  highlightBars(fromBar: number, toBar: number): void {
+    this.highlight = { fromBar, toBar };
+    this.applyHighlight();
+  }
+
+  clearHighlight(): void {
+    this.highlight = null;
+    this.api.clearPlaybackRangeHighlight();
+  }
+
+  /**
+   * alphaTab re-applies its stored selection after every render, and 1.8's
+   * clearPlaybackRangeHighlight() only clears the drawing, not that stored
+   * selection. If its beats are not part of the next layout (other score or
+   * track), alphaTab throws. Reset the stored selection too.
+   */
+  private beforeLayoutChange(): void {
+    this.layoutCurrent = false;
+    this.api.clearPlaybackRangeHighlight();
+    const internals = this.api as unknown as { _selectionStart?: unknown; _selectionEnd?: unknown };
+    internals._selectionStart = undefined;
+    internals._selectionEnd = undefined;
+  }
+
+  private applyHighlight(): void {
+    const h = this.highlight;
+    const lookup = this.api.boundsLookup;
+    if (!h || !this.layoutCurrent || !lookup?.isFinished) return;
+    const staff = this.score?.tracks[this.trackIndex]?.staves[0];
+    const first = staff?.bars[h.fromBar]?.voices[0]?.beats[0];
+    const lastBeats = staff?.bars[h.toBar]?.voices[0]?.beats;
+    const last = lastBeats?.[lastBeats.length - 1];
+    // Only once the new layout contains these beats (not the previous score's).
+    if (!first || !last || !lookup.findBeat(first) || !lookup.findBeat(last)) return;
+    try {
+      this.api.highlightPlaybackRange(first, last);
+    } catch {
+      // Purely cosmetic; the loop itself is set via playbackRange.
+    }
   }
 
   set zoom(scale: number) {

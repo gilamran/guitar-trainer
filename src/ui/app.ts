@@ -281,7 +281,12 @@ export class App {
 
   /** The user drag-selected beats in the score: snap to whole bars and loop them. */
   private onRangeSelected(range: TickRange | null): void {
-    if (!range || !this.lookup) return;
+    if (!range) {
+      // A plain click seeks and makes alphaTab drop the range; keep looping.
+      if (this.appliedLoop) this.view?.restoreLoop(this.appliedLoop);
+      return;
+    }
+    if (!this.lookup) return;
     const a = this.appliedLoop;
     if (a && a.startTick === range.startTick && a.endTick === range.endTick) return; // our own update
     const bars = ticksToBarRange(this.lookup, range);

@@ -33,6 +33,13 @@ export interface NoteBox {
   readonly h: number;
 }
 
+function toPlaybackRange(range: TickRange): synth.PlaybackRange {
+  const r = new synth.PlaybackRange();
+  r.startTick = range.startTick;
+  r.endTick = range.endTick;
+  return r;
+}
+
 /** Tracks a player can practice: anything with a melodic, stringed staff. */
 export function isPracticeTrack(track: Track): boolean {
   return !track.isPercussion && track.staves.some((s) => s.isStringed && !s.isPercussion);
@@ -182,16 +189,26 @@ export class ScoreView {
   /** Loop `range` (or play everything when null) and move the cursor to its start. */
   setLoop(range: TickRange | null): void {
     if (range) {
-      const playbackRange = new synth.PlaybackRange();
-      playbackRange.startTick = range.startTick;
-      playbackRange.endTick = range.endTick;
-      this.api.playbackRange = playbackRange;
+      this.api.playbackRange = toPlaybackRange(range);
       this.api.isLooping = true;
       this.api.tickPosition = range.startTick;
     } else {
       this.api.playbackRange = null;
       this.api.isLooping = false;
     }
+  }
+
+  /**
+   * Re-applies a loop after alphaTab dropped it (a plain click in the score
+   * seeks and clears the playback range). Keeps the clicked position when it
+   * lies inside the loop; setting a range alone would jump to its start.
+   */
+  restoreLoop(range: TickRange): void {
+    const pos = this.api.tickPosition;
+    this.api.playbackRange = toPlaybackRange(range);
+    this.api.isLooping = true;
+    this.api.tickPosition = pos >= range.startTick && pos < range.endTick ? pos : range.startTick;
+    this.applyHighlight();
   }
 
   /** Mute/unmute the practiced track and set the volume of the others. */
